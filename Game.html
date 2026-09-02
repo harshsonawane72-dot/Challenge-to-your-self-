@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Body-Tracked Obstacle Course</title>
+    
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #1a1a1a;
+            color: white;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        #game-container {
+            position: relative;
+            width: 800px;
+            height: 600px;
+            border: 4px solid #333;
+            border-radius: 10px;
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+            background-color: #000;
+        }
+
+        /* The webcam feed is drawn directly to the canvas, so we hide the raw video */
+        #input_video {
+            display: none; 
+        }
+
+        #output_canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            border-radius: 6px;
+        }
+
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 10;
+            border-radius: 6px;
+        }
+
+        #hud {
+            position: absolute;
+            top: 15px;
+            left: 20px;
+            font-size: 24px;
+            font-weight: bold;
+            color: #00ffcc;
+            z-index: 5;
+            text-shadow: 2px 2px 4px #000;
+            display: none;
+        }
+
+        button {
+            padding: 15px 30px;
+            font-size: 20px;
+            font-weight: bold;
+            color: #fff;
+            background: #00ffcc;
+            background: linear-gradient(90deg, #00ffcc 0%, #0066ff 100%);
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+
+        button:hover {
+            transform: scale(1.05);
+        }
+
+        #status-text {
+            margin-top: 20px;
+            font-size: 18px;
+            color: #ccc;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="game-container">
+        <video id="input_video" autoplay playsinline></video>
+        <canvas id="output_canvas" width="800" height="600"></canvas>
+        <div id="hud">Score: <span id="score-val">0</span> | Timer: <span id="timer-val">0</span>s</div>
+        
+        <div id="ui-layer">
+            <h1 id="title">Fitness Runner</h1>
+            <p style="text-align:center; max-width: 80%;">Control the blue orb by moving your nose up and down.<br>Do push-ups or squats to dodge the red walls!</p>
+            <button id="start-btn">Start Camera & Game</button>
+            <div id="status-text"></div>
+        </div>
+    </div>
+
+    <script>
+        // --- Setup Elements ---
+        const videoElement = document.getElementById('input_video');
+        const canvasElement = document.getElementById('output_canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const uiLayer = document.getElementById('ui-layer');
+        const startBtn = document.getElementById('start-btn');
+        const statusText = document.getElementById('status-text');
+        const hud = document.getElementById('hud');
+        const scoreVal = document.getElementById('score-val');
+        const timerVal = document.getElementById('timer-val');
+
+        // --- Game State Variables ---
+        let isGameRunning = false;
+        let isModelLoaded = false;
+        let noseY = 0.5; // Normalized Y position of nose (0 to 1)
+        
+        let score = 0;
+        let startTime = 0;
+        let obstacles = [];
+        let frameCount = 0;
+        
+        // Player stats
+        const player = {
+            x: 150,
+            y: 300,
+            radius: 15,
+            color: '#00ffcc'
+        };
+
+        // --- MediaPipe Pose Setup ---
+        const pose = new Pose({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
+        }});
+
+        pose.setOptions({
+            modelComplexity: 1,
+            smoothLandmarks: true,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        pose.onResults(onPoseResults);
+
+        // --- Pose Callback ---
+        function onPoseResults(results) {
+            // Draw webcam feed to canvas as background
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            
+            // Mirror the camera feed
+            canvasCtx.translate(canvasElement.width, 0);
+            canvasCtx.scale(-1, 1);
+            canvasCtx.globalAlpha = 0.4; // Make camera feed dim so game is visible
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.globalAlpha = 1.0;
+            canvasCtx.restore();
+
+            // Extract Nose Position (Landmark 0)
+            if (results.poseLandmarks && results.poseLandmarks.length > 0) {
+                const nose = results.poseLandmarks[0];
+                // Smooth the movement slightly using interpolation (lerp)
+                noseY = noseY + (nose.y - noseY) * 0.2; 
+                
+                // Keep the player within the canvas bounds
+                player.y = Math.max(player.radius, Math.min(canvasElement.height - player.radius, noseY * canvasElement.height));
+            } else {
+                // If no body is detected, slowly drop the player to the bottom
+                player.y += (canvasElement.height - player.y) * 0.05;
+            }
+
+            if (isGameRunning) {
+                updateAndDrawGame();
+            } else if (isModelLoaded) {
+                // Just draw the player waiting
+                drawPlayer();
+            }
+        }
+
+        // --- Camera Setup ---
+        const camera = new Camera(videoElement, {
+            onFrame: async () => {
+                await pose.send({image: videoElement});
+            },
+            width: 800,
+            height: 600
+        });
+
+        // --- Button Logic ---
+        startBtn.addEventListener('click', () => {
+            if (!isModelLoaded) {
+                startBtn.style.display = 'none';
+                statusText.innerText = "Requesting camera & loading AI model (this may take a few seconds)...";
+                
+                camera.start().then(() => {
+                    isModelLoaded = true;
+                    startGame();
+                }).catch((err) => {
+                    statusText.innerText = "Error: Camera access denied or not found.";
+                    startBtn.style.display = 'block';
+                    console.error(err);
+                });
+            } else {
+                startGame();
+            }
+        });
+
+        function startGame() {
+            isGameRunning = true;
+            uiLayer.style.display = 'none';
+            hud.style.display = 'block';
+            score = 0;
+            obstacles = [];
+            frameCount = 0;
+            startTime = Date.now();
+        }
+
+        function gameOver() {
+            isGameRunning = false;
+            uiLayer.style.display = 'flex';
+            hud.style.display = 'none';
+            document.getElementById('title').innerText = "Game Over!";
+            startBtn.style.display = 'block';
+            startBtn.innerText = "Try Again";
+            statusText.innerText = `Final Score: ${score} | Time: ${Math.floor((Date.now() - startTime)/1000)}s`;
+        }
+
+        // --- Game Logic ---
+        function updateAndDrawGame() {
+            frameCount++;
+            
+            // 1. Update Timer
+            const elapsed = Math.floor((Date.now() - startTime) / 1000);
+            timerVal.innerText = elapsed;
+
+            // 2. Spawn Obstacles
+            // Spawn a new obstacle every 90 frames (approx 3 seconds)
+            if (frameCount % 90 === 0) {
+                const gap = 180; // Size of the safe zone
+                const minHeight = 50;
+                const topWallHeight = Math.random() * (canvasElement.height - gap - minHeight * 2) + minHeight;
+                
+                obstacles.push({
+                    x: canvasElement.width,
+                    w: 40,
+                    topH: topWallHeight,
+                    bottomY: topWallHeight + gap,
+                    passed: false
+                });
+            }
+
+            // 3. Update & Draw Obstacles
+            for (let i = obstacles.length - 1; i >= 0; i--) {
+                let obs = obstacles[i];
+                obs.x -= 5; // Move left (speed)
+
+                // Draw Top Wall
+                canvasCtx.fillStyle = '#ff3366';
+                canvasCtx.fillRect(obs.x, 0, obs.w, obs.topH);
+                
+                // Draw Bottom Wall
+                const bottomH = canvasElement.height - obs.bottomY;
+                canvasCtx.fillRect(obs.x, obs.bottomY, obs.w, bottomH);
+
+                // Collision Detection (Circle vs Rectangles)
+                // Top Wall Collision
+                if (circleRectCollision(player, {x: obs.x, y: 0, w: obs.w, h: obs.topH})) {
+                    gameOver();
+                }
+                // Bottom Wall Collision
+                if (circleRectCollision(player, {x: obs.x, y: obs.bottomY, w: obs.w, h: bottomH})) {
+                    gameOver();
+                }
+
+                // Score Update
+                if (!obs.passed && player.x > obs.x + obs.w) {
+                    obs.passed = true;
+                    score += 10;
+                    scoreVal.innerText = score;
+                }
+
+                // Remove off-screen obstacles
+                if (obs.x + obs.w < 0) {
+                    obstacles.splice(i, 1);
+                }
+            }
+
+            // 4. Draw Player
+            drawPlayer();
+        }
+
+        function drawPlayer() {
+            canvasCtx.beginPath();
+            canvasCtx.arc(player.x, player.y, player.radius, 0, 2 * Math.PI);
+            canvasCtx.fillStyle = player.color;
+            canvasCtx.fill();
+            canvasCtx.lineWidth = 3;
+            canvasCtx.strokeStyle = '#ffffff';
+            canvasCtx.stroke();
+            
+            // Add a glowing effect
+            canvasCtx.shadowBlur = 20;
+            canvasCtx.shadowColor = player.color;
+            canvasCtx.fill();
+            canvasCtx.shadowBlur = 0; // Reset
+        }
+
+        // Simple Circle-Rectangle Collision Math
+        function circleRectCollision(circle, rect) {
+            let testX = circle.x;
+            let testY = circle.y;
+
+            if (circle.x < rect.x) testX = rect.x;      
+            else if (circle.x > rect.x + rect.w) testX = rect.x + rect.w;   
+            
+            if (circle.y < rect.y) testY = rect.y;      
+            else if (circle.y > rect.y + rect.h) testY = rect.y + rect.h;   
+
+            let distX = circle.x - testX;
+            let distY = circle.y - testY;
+            let distance = Math.sqrt((distX*distX) + (distY*distY));
+
+            return distance <= circle.radius;
+        }
+    </script>
+</body>
+</html>
